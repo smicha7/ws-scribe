@@ -1,0 +1,87 @@
+# Telemetria ONNX Runtime w WS.Scribe dla Windows — sprawdzenie na prawdziwym Windows (runner windows-2022, administrator).
+# Sesja ETW (logman) słucha dostawcy TraceLogging „Microsoft.ML.ONNXRuntime” {3a26b1ff-7484-7484-7484-15261f42614d}; każdy podany
+# WS.Scribe-<wersja>.exe z wydania „windows” rozpoznaje nagrania testowe modelu (--transcribe). Wynik w podsumowaniu zadania:
+# liczba i nazwy zdarzeń tego dostawcy, tekst, sumy bibliotek rozpakowanych z .exe i ciągi eSpeak/piper w sherpa-onnx-c-api.dll.
+# Zadanie kończy się błędem, gdy wersja z „silent” wyśle choć jedno zdarzenie albo jej biblioteka zawiera eSpeak/piper.
+# Uruchomienie: gh workflow run windows-etw.yml --repo smicha7/ws-scribe -f versions="0.1.1 0.1.2" -f silent="0.1.2"
+name: windows-etw
+
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: "WS.Scribe versions from the 'windows' release (space-separated)"
+        default: "0.1.1 0.1.2"
+      silent:
+        description: "Versions that must send 0 ONNX Runtime events and contain no eSpeak/piper (space-separated)"
+        default: "0.1.2"
+
+permissions:
+  contents: read
+
+env:
+  MODEL_URL: https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2
+  MODEL_SHA: 5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf
+  PROVIDER: "{3a26b1ff-7484-7484-7484-15261f42614d}"
+
+jobs:
+  etw:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - name: Model (sherpa-onnx asr-models, fixed SHA-256)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          curl.exe -fsSL $env:MODEL_URL -o m.tar.bz2
+          if ((Get-FileHash m.tar.bz2 -Algorithm SHA256).Hash.ToLower() -ne $env:MODEL_SHA) { throw "wrong model SHA-256" }
+          tar -xjf m.tar.bz2
+          Remove-Item m.tar.bz2
+
+      - name: ETW session per version, transcription, extracted libraries
+        shell: pwsh
+        env:
+          VERSIONS: ${{ inputs.versions }}
+          SILENT: ${{ inputs.silent }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $m = Join-Path $PWD 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8'
+          $guid = $env:PROVIDER.Trim('{}')
+          $silent = $env:SILENT.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
+          $fail = @()
+          $md = @("| version | exe SHA-256 | ORT ETW events | event names | sherpa-onnx-c-api.dll SHA-256 | eSpeak / piper strings |", "|---|---|---|---|---|---|")
+          $texts = @()
+          foreach ($v in $env:VERSIONS.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)) {
+            if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "bad version '$v'" }
+            $exe = Join-Path $PWD "WS.Scribe-$v.exe"
+            curl.exe -fsSL "https://github.com/smicha7/ws-scribe/releases/download/windows/WS.Scribe-$v.exe" -o $exe
+            $exeSha = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+            $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR = Join-Path $PWD "x-$v"   # each version extracts its native libraries here
+            $etl = Join-Path $PWD "ort-$v.etl"
+            $session = "wsscribe-ort-" + ($v -replace '\.', '-')
+            logman start $session -p $env:PROVIDER 0xffffffffffffffff 0xff -o $etl -ets | Out-Null
+            if ($LASTEXITCODE) { throw "logman start failed ($LASTEXITCODE)" }
+            foreach ($w in 'en', 'de') {
+              $out = Join-Path $PWD "out-$v-$w.txt"
+              Start-Process -FilePath $exe -ArgumentList "--transcribe `"$m\test_wavs\$w.wav`" --model `"$m`" --out `"$out`"" -Wait -NoNewWindow
+              $texts += "### $v $w.wav"; $texts += '```'; $texts += (Get-Content $out -Encoding UTF8); $texts += '```'
+            }
+            Start-Sleep -Seconds 2
+            logman stop $session -ets | Out-Null
+            $xml = Join-Path $PWD "ort-$v.xml"
+            tracerpt $etl -o $xml -of XML -y | Out-Null
+            [xml]$doc = Get-Content $xml -Raw
+            $events = @($doc.Events.Event | Where-Object { $_.System.Provider.Guid -and $_.System.Provider.Guid.Trim('{}') -ieq $guid })
+            $names = ($events | ForEach-Object { if ($_.RenderingInfo.Task) { $_.RenderingInfo.Task } elseif ($_.EventData.Name) { $_.EventData.Name } else { "id " + $_.System.EventID } } | Group-Object | ForEach-Object { "$($_.Name)×$($_.Count)" }) -join ', '
+            $dll = Get-ChildItem $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR -Recurse -Filter sherpa-onnx-c-api.dll | Select-Object -First 1
+            $dllSha = (Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLower()
+            $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($dll.FullName))
+            $espeak = ([regex]::Matches($text, '(?i)espeak(?!er)')).Count   # „…eSpeaker…” = API rozpoznawania mówcy, nie eSpeak NG
+            $piper = ([regex]::Matches($text, '(?i)piper|phonemize')).Count
+            $md += "| $v | ``$exeSha`` | $($events.Count) | $names | ``$dllSha`` | $espeak / $piper |"
+            Get-ChildItem $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR -Recurse -Filter *.dll | Where-Object { $_.Name -match 'onnx' } | ForEach-Object { "$v $($_.Name) $((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())" }
+            if ($silent -contains $v -and ($events.Count -ne 0 -or $espeak -ne 0 -or $piper -ne 0)) { $fail += "${v}: $($events.Count) events, eSpeak $espeak, piper $piper" }
+          }
+          ($md + "" + $texts) -join "`n" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          ($md + "" + $texts) -join "`n"
+          if ($fail) { throw ("not silent: " + ($fail -join '; ')) }
