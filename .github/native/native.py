@@ -26,30 +26,46 @@ def sha256(path):
 def strings(data):
     # ciągi drukowalne ≥ 4 znaki, jak `strings -a`; plus UTF-16LE (Windows)
     for m in re.finditer(rb"[\x20-\x7e\t]{4,}", data):
-        yield m.group().decode("ascii").lower()
+        yield m.group().decode("ascii")
     for m in re.finditer(rb"(?:[\x20-\x7e\t]\x00){4,}", data):
-        yield m.group()[::2].decode("ascii").lower()
+        yield m.group()[::2].decode("ascii")
 
 
 def scan(path):
+    # raw = jak `strings -a | grep -ci słowo`; real = bez fałszywych trafień „…e” + „speaker” (np. CreateSpeakerEmbedding, OfflineSpeakerDiarization)
     with open(path, "rb") as f:
         data = f.read()
-    n = {w: 0 for w in BANNED + INFO}
+    raw = {w: 0 for w in BANNED + INFO}
+    real = dict(raw)
+    fp = []
     for s in strings(data):
-        for w in n:
-            if w in s:
-                n[w] += 1
-    return n
+        low = s.lower()
+        for w in raw:
+            if w in low:
+                raw[w] += 1
+                if w in (low.replace("speaker", "") if w == "espeak" else low):
+                    real[w] += 1
+                    if w in BANNED:
+                        print(f"  TTS string in {os.path.basename(path)}: {s[:160]!r}")
+                elif len(fp) < 12:
+                    fp.append(s[:100])
+    return raw, real, fp
 
 
 def check(files):
     bad, out = 0, []
     for f in files:
-        n = scan(f)
-        line = f"{os.path.basename(f)}: " + " ".join(f"{w.replace(' ', '_')}={c}" for w, c in n.items()) + f"  sha256={sha256(f)}"
+        raw, real, fp = scan(f)
+        line = (f"{os.path.basename(f)}: " + " ".join(f"{w}={real[w]}" for w in BANNED) +
+                f"  (raw `strings | grep -ci espeak` = {raw['espeak']}, of which {raw['espeak'] - real['espeak']} only inside the word 'speaker')" +
+                f"  gpl={raw['gpl']} general_public_license={raw['general public license']}  sha256={sha256(f)}")
         print(line)
         out.append(line)
-        bad += sum(n[w] for w in BANNED)
+        if fp:
+            ex = "; ".join(fp)
+            print(f"  'speaker' matches, e.g.: {ex}")
+            out.append(f"  'speaker' matches, e.g.: {ex}")
+        bad += sum(real[w] for w in BANNED)
     if bad:
         print("BŁĄD: w bibliotekach są ciągi TTS (espeak/piper/phonemize/cppjieba)", file=sys.stderr)
     return bad, out
@@ -155,7 +171,10 @@ def package(rid, src, build, out):
               "third-party sources fetched by CMake (_deps), compiled in or linked:"]
     for name, _, urls, hashes in deps:
         lines.append(f"  {name}: {' '.join(urls) or '?'} {' '.join(hashes)}".rstrip())
-    lines += ["", "string check (printable runs >= 4 chars, ASCII + UTF-16LE, case-insensitive; must be 0 for espeak/piper/phonemize/cppjieba):"]
+    lines += ["", "string check (printable runs >= 4 chars as `strings -a`, ASCII + UTF-16LE, case-insensitive; espeak/piper/phonemize/cppjieba must be 0).",
+              "A case-insensitive 'espeak' also matches the speaker-recognition API names ('...e' + 'Speaker...', e.g. SherpaOnnxCreateSpeakerEmbeddingExtractor,",
+              "OfflineSpeakerDiarization); such strings are counted separately and are not eSpeak NG. Equivalent shell check:",
+              "  strings -a <lib> | grep -i espeak | grep -vci speaker   -> 0;   strings -a <lib> | grep -ci piper -> 0"]
     lines += ["  " + c for c in checks]
     smoke = os.environ.get("SMOKE_FILE")
     if smoke and os.path.exists(smoke):

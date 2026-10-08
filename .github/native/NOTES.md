@@ -11,7 +11,7 @@ Built by [`.github/workflows/native.yml`](https://github.com/smicha7/ws-scribe/b
 
 Each zip contains `BUILD-INFO.txt` (CMake options, compiler, build image, every third-party source URL with its SHA-256, the string check and the smoke-test result) and `licenses/` (license files of sherpa-onnx and of each third-party source).
 
-Checks in every run: no `espeak`, `piper`, `phonemize` or `cppjieba` strings in either library (ASCII and UTF-16); no TTS sources fetched by CMake; on the same runner, the Parakeet TDT 0.6B v3 int8 model transcribes the model's test recordings to exactly the same text with these libraries as with the NuGet 1.13.8 libraries.
+Checks in every run: no `espeak`, `piper`, `phonemize` or `cppjieba` strings in either library (ASCII and UTF-16) — a case-insensitive `espeak` search also hits the speaker-recognition API names (`CreateSpeakerEmbedding…`, `OfflineSpeakerDiarization…` = "…e" + "Speaker"), which are listed separately in `BUILD-INFO.txt` and are not eSpeak NG; no TTS sources fetched by CMake; on the same runner, the Parakeet TDT 0.6B v3 int8 model transcribes the model's test recordings to exactly the same text with these libraries as with the NuGet 1.13.8 libraries.
 
 `onnxruntime` is ONNX Runtime 1.28.2 as prebuilt by the sherpa-onnx author ([csukuangfj/onnxruntime-libs v1.28.2](https://github.com/csukuangfj/onnxruntime-libs/releases/tag/v1.28.2)) and downloaded by sherpa-onnx's CMake with a fixed SHA-256; it is not rebuilt here.
 

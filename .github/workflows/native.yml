@@ -136,10 +136,12 @@ jobs:
           for f in $LIBS; do cp -L "sherpa-onnx/build/install/lib/$f" t/ours/; done
           ls -la t/ours
           $PY .github/native/native.py check t/ours/*
+          # binutils `strings`, gdzie jest; „espeak” bez wielkości liter trafia też w „…eSpeaker…” (CreateSpeakerEmbedding, OfflineSpeakerDiarization) — te odliczamy
           if command -v strings >/dev/null; then
             for f in t/ours/*; do
-              e=$(strings -a "$f" | grep -ci espeak || true); p=$(strings -a "$f" | grep -ci piper || true)
-              echo "strings $f: espeak=$e piper=$p"; [[ $e == 0 && $p == 0 ]]
+              e=$(strings -a "$f" | grep -ci espeak || true); r=$(strings -a "$f" | grep -i espeak | grep -vci speaker || true)
+              p=$(strings -a "$f" | grep -ci piper || true); h=$(strings -a "$f" | grep -ci phonemize || true)
+              echo "strings $f: espeak=$e (without 'speaker' words: $r) piper=$p phonemize=$h"; [[ $r == 0 && $p == 0 && $h == 0 ]]
             done
           fi
 
