@@ -27,19 +27,23 @@ env:
 jobs:
   etw:
     runs-on: windows-2022
-    timeout-minutes: 40
+    timeout-minutes: 30
     steps:
       - name: Model (sherpa-onnx asr-models, fixed SHA-256)
-        shell: pwsh
+        shell: bash   # Git Bash: curl + GNU tar/bzip2, jak w native.yml (pwsh + tar.exe z Windows stanęło na 15 min bez komunikatu)
         run: |
-          $ErrorActionPreference = 'Stop'
-          curl.exe -fsSL $env:MODEL_URL -o m.tar.bz2
-          if ((Get-FileHash m.tar.bz2 -Algorithm SHA256).Hash.ToLower() -ne $env:MODEL_SHA) { throw "wrong model SHA-256" }
-          tar -xjf m.tar.bz2
-          Remove-Item m.tar.bz2
+          set -euo pipefail
+          date -u +%T
+          curl -fsSL --retry 5 --retry-all-errors --speed-limit 1000000 --speed-time 30 -C - -o m.tar.bz2 "$MODEL_URL"
+          date -u +%T
+          echo "$MODEL_SHA  m.tar.bz2" | sha256sum -c -
+          tar -xjf m.tar.bz2 && rm m.tar.bz2
+          date -u +%T
+          ls -la sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8 sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/test_wavs
 
       - name: ETW session per version, transcription, extracted libraries
         shell: pwsh
+        timeout-minutes: 15
         env:
           VERSIONS: ${{ inputs.versions }}
           SILENT: ${{ inputs.silent }}
@@ -54,7 +58,8 @@ jobs:
           foreach ($v in $env:VERSIONS.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)) {
             if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "bad version '$v'" }
             $exe = Join-Path $PWD "WS.Scribe-$v.exe"
-            curl.exe -fsSL "https://github.com/smicha7/ws-scribe/releases/download/windows/WS.Scribe-$v.exe" -o $exe
+            curl.exe -fsSL --retry 5 --retry-all-errors --speed-limit 1000000 --speed-time 30 -C - "https://github.com/smicha7/ws-scribe/releases/download/windows/WS.Scribe-$v.exe" -o $exe
+            if ($LASTEXITCODE) { throw "download of $v failed ($LASTEXITCODE)" }
             $exeSha = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
             $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR = Join-Path $PWD "x-$v"   # each version extracts its native libraries here
             $etl = Join-Path $PWD "ort-$v.etl"
@@ -63,7 +68,8 @@ jobs:
             if ($LASTEXITCODE) { throw "logman start failed ($LASTEXITCODE)" }
             foreach ($w in 'en', 'de') {
               $out = Join-Path $PWD "out-$v-$w.txt"
-              Start-Process -FilePath $exe -ArgumentList "--transcribe `"$m\test_wavs\$w.wav`" --model `"$m`" --out `"$out`"" -Wait -NoNewWindow
+              $p = Start-Process -FilePath $exe -ArgumentList "--transcribe `"$m\test_wavs\$w.wav`" --model `"$m`" --out `"$out`"" -NoNewWindow -PassThru
+              if (-not $p.WaitForExit(180000)) { $p.Kill(); throw "$v $w.wav: no exit within 3 min" }
               $texts += "### $v $w.wav"; $texts += '```'; $texts += (Get-Content $out -Encoding UTF8); $texts += '```'
             }
             Start-Sleep -Seconds 2
