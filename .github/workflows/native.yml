@@ -1,0 +1,220 @@
+# Biblioteki natywne sherpa-onnx v1.13.8 (ten sam ABI co pakiet .NET 1.13.8) BEZ TTS — bez eSpeak NG (GPL-3.0+) i piper-phonemize.
+# win-x64 (windows-2022, MSVC, statyczny CRT jak w NuGet), linux-x64 i linux-arm64 (manylinux2014, glibc 2.17, jak w NuGet).
+# Każda platforma: budowa → sprawdzenie ciągów → test dymny (ten sam tekst co biblioteki z NuGet) → zip.
+# Wydanie: prerelease „native” w tym repo (nigdy „latest” — z „latest” aktualizuje się Mac).
+# Uruchomienie: gh workflow run native.yml --repo smicha7/ws-scribe [-f publish=false]
+name: native
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Upload zips to the 'native' prerelease"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native
+  cancel-in-progress: false
+
+env:
+  SHERPA_ONNX_TAG: v1.13.8
+  SHERPA_ONNX_COMMIT: 11afbd009a7f8c08f4bcf2fc1b265d0df4670fbf
+  # model do testu dymnego (ta sama suma co w release-windows.sh)
+  MODEL_URL: https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2
+  MODEL_SHA: 5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf
+  CMAKE_OPTS: >-
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_INSTALL_PREFIX=./install
+    -DBUILD_SHARED_LIBS=ON
+    -DSHERPA_ONNX_ENABLE_TTS=OFF
+    -DSHERPA_ONNX_ENABLE_C_API=ON
+    -DSHERPA_ONNX_ENABLE_BINARY=OFF
+    -DSHERPA_ONNX_BUILD_C_API_EXAMPLES=OFF
+    -DSHERPA_ONNX_ENABLE_PORTAUDIO=OFF
+    -DSHERPA_ONNX_ENABLE_WEBSOCKET=OFF
+    -DSHERPA_ONNX_ENABLE_PYTHON=OFF
+    -DSHERPA_ONNX_ENABLE_JNI=OFF
+    -DSHERPA_ONNX_ENABLE_TESTS=OFF
+    -DSHERPA_ONNX_ENABLE_GPU=OFF
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_NOLOGO: 1
+
+jobs:
+  build:
+    name: ${{ matrix.rid }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            os: windows-2022
+            py: python
+            libs: sherpa-onnx-c-api.dll onnxruntime.dll
+            cmake_extra: -A x64 -DSHERPA_ONNX_USE_STATIC_CRT=ON
+          - rid: linux-x64
+            os: ubuntu-24.04
+            py: python3
+            libs: libsherpa-onnx-c-api.so libonnxruntime.so
+            image: quay.io/pypa/manylinux2014_x86_64@sha256:6f74cabeac2432570aa4bfdb29f7c1f30313d4d6654d764c44e574b6ffdd4ed5   # 2026.09.26-1
+          - rid: linux-arm64
+            os: ubuntu-24.04-arm
+            py: python3
+            libs: libsherpa-onnx-c-api.so libonnxruntime.so
+            image: quay.io/pypa/manylinux2014_aarch64@sha256:d36e257b4f7b1130a1442a5cd28022307645a92b8093ab65543205426354cfd2   # 2026.09.26-1
+    defaults:
+      run:
+        shell: bash
+    env:
+      RID: ${{ matrix.rid }}
+      PY: ${{ matrix.py }}
+      LIBS: ${{ matrix.libs }}
+      CMAKE_EXTRA: ${{ matrix.cmake_extra }}
+    steps:
+      - name: Checkout (this repo)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Checkout sherpa-onnx ${{ env.SHERPA_ONNX_TAG }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          repository: k2-fsa/sherpa-onnx
+          ref: ${{ env.SHERPA_ONNX_COMMIT }}
+          path: sherpa-onnx
+          persist-credentials: false
+
+      - name: Verify tag and stamp version
+        run: |
+          # znacznik v1.13.8 musi wskazywać ten sam commit (nie budujemy przesuniętego znacznika)
+          tag=$(git ls-remote https://github.com/k2-fsa/sherpa-onnx "refs/tags/$SHERPA_ONNX_TAG" | cut -f1)
+          [[ $tag == "$SHERPA_ONNX_COMMIT" ]] || { echo "tag $SHERPA_ONNX_TAG -> $tag, expected $SHERPA_ONNX_COMMIT"; exit 1; }
+          cd sherpa-onnx
+          [[ $(git rev-parse HEAD) == "$SHERPA_ONNX_COMMIT" ]]
+          # jak upstream new-release.sh: sha1/data w version.cc (nic poza tym w źródle się nie zmienia)
+          sha1=$(git rev-parse --short=8 HEAD)
+          date=$(TZ=UTC git log -1 --format=%ad --date=local)
+          sed -i "s/  static const char \*sha1.*/  static const char *sha1 = \"$sha1\";/; s/  static const char \*date.*/  static const char *date = \"$date\";/" sherpa-onnx/csrc/version.cc
+          git diff --stat
+          grep -nE "sha1 =|date =|version =" sherpa-onnx/csrc/version.cc
+
+      - name: Build (Windows, MSVC)
+        if: runner.os == 'Windows'
+        run: |
+          echo "BUILT_ON=$ImageOS $ImageVersion (GitHub-hosted runner ${{ matrix.os }})" >> "$GITHUB_ENV"
+          echo "CMAKE_VERSION_STR=$(cmake --version | head -1)" >> "$GITHUB_ENV"
+          mkdir -p sherpa-onnx/build && cd sherpa-onnx/build
+          cmake $CMAKE_EXTRA $CMAKE_OPTS ..
+          cmake --build . --config Release --target install --parallel 4
+          ls -la install/lib
+
+      - name: Build (Linux, manylinux2014)
+        if: runner.os == 'Linux'
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          echo "BUILT_ON=docker $IMAGE on ${{ matrix.os }} $ImageVersion" >> "$GITHUB_ENV"
+          docker run --rm -e CMAKE_OPTS -v "$PWD/sherpa-onnx:/src" -w /src "$IMAGE" bash -euxc '
+            gcc --version | head -1
+            cmake --version | head -1 > cmake-version.txt
+            mkdir -p build && cd build
+            cmake $CMAKE_OPTS ..
+            make -j"$(nproc)"
+            make install
+            ls -la install/lib'
+          sudo chown -R "$(id -u):$(id -g)" sherpa-onnx
+          echo "CMAKE_VERSION_STR=$(cat sherpa-onnx/cmake-version.txt)" >> "$GITHUB_ENV"
+
+      - name: Check strings (no eSpeak NG / piper)
+        run: |
+          mkdir -p t/ours
+          for f in $LIBS; do cp -L "sherpa-onnx/build/install/lib/$f" t/ours/; done
+          ls -la t/ours
+          $PY .github/native/native.py check t/ours/*
+          if command -v strings >/dev/null; then
+            for f in t/ours/*; do
+              e=$(strings -a "$f" | grep -ci espeak || true); p=$(strings -a "$f" | grep -ci piper || true)
+              echo "strings $f: espeak=$e piper=$p"; [[ $e == 0 && $p == 0 ]]
+            done
+          fi
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68   # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Smoke test (NuGet libs vs ours, same text)
+        run: |
+          curl -fsSL --retry 3 -o t/m.tar.bz2 "$MODEL_URL"
+          echo "$MODEL_SHA  t/m.tar.bz2" | sha256sum -c -
+          tar -xjf t/m.tar.bz2 -C t && rm t/m.tar.bz2
+          M=t/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8
+          wavs=("$M"/test_wavs/*.wav); [[ -f ${wavs[0]} ]] || { echo "no test wavs"; exit 1; }
+          dotnet build .github/native/smoke -c Release -r "$RID" --no-self-contained -o t/nuget
+          cp -R t/nuget t/mine
+          cp t/ours/* t/mine/
+          dotnet t/nuget/NativeSmoke.dll "$M" "${wavs[@]}" > t/nuget.txt
+          dotnet t/mine/NativeSmoke.dll "$M" "${wavs[@]}" > t/mine.txt
+          cat t/nuget.txt; echo ---; cat t/mine.txt
+          # nasze biblioteki naprawdę wczytane (suma pliku w wyniku), tekst identyczny z bibliotekami z NuGet
+          for f in t/ours/*; do grep -q "^lib .* $(sha256sum "$f" | cut -d' ' -f1) " t/mine.txt || { echo "not loaded: $f"; exit 1; }; done
+          diff <(grep '^text ' t/nuget.txt) <(grep '^text ' t/mine.txt)
+          [[ $(grep -c '^text .*: .\+' t/mine.txt) == ${#wavs[@]} ]]
+          { grep -E '^(version|text) ' t/mine.txt; echo "same text as the org.k2fsa.sherpa.onnx.runtime.$RID 1.13.8 NuGet libraries on this runner: yes";
+            grep '^lib ' t/nuget.txt | sed 's/^lib /NuGet lib: /'; } > t/smoke.txt
+
+      - name: Package
+        env:
+          SMOKE_FILE: t/smoke.txt
+        run: |
+          $PY .github/native/native.py package "$RID" sherpa-onnx sherpa-onnx/build "native-$RID.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a   # v7.0.1
+        with:
+          name: native-${{ matrix.rid }}
+          path: native-${{ matrix.rid }}.zip
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout (release notes)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/native
+
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c   # v8.0.1
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish to the 'native' prerelease
+        run: |
+          cd dist
+          ls -la
+          sha256sum native-*.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          notes=../.github/native/NOTES.md
+          gh release view native >/dev/null 2>&1 ||
+            gh release create native --prerelease --latest=false --target "$GITHUB_SHA" --title "sherpa-onnx native libraries without TTS (for WS.Scribe)" --notes-file "$notes"
+          gh release upload native native-*.zip SHA256SUMS.txt --clobber
+          gh release edit native --prerelease --latest=false --notes-file "$notes"
+          # „latest” musi zostać wydaniem Maca (v…)
+          latest=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)
+          echo "latest: $latest"; [[ $latest == v* ]]
